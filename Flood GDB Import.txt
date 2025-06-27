@@ -1,0 +1,114 @@
+import os
+import subprocess
+import sys
+import shutil
+import zipfile
+
+# === CONFIGURATION ===
+zip_folder = r"C:\\path\\to folder"  # Folder with FEMA zip files
+temp_unzip_dir = r"C:\\path\\to folder"
+pg_connection = "PG:host= dbname= user= password="
+target_srs = "EPSG:4326"
+
+# === AUTO-DETECT GDAL FROM QGIS INSTALL ===
+def detect_gdal_bin():
+    common_qgis_paths = [
+        r"C:\Program Files\QGIS 3.28.2\bin", # Path to ogr2ogr exe
+    ]
+    for path in common_qgis_paths:
+        ogr2ogr = os.path.join(path, "ogr2ogr.exe")
+        ogrinfo = os.path.join(path, "ogrinfo.exe")
+        if os.path.exists(ogr2ogr) and os.path.exists(ogrinfo):
+            return ogr2ogr, ogrinfo
+
+    # Fall back to system PATH
+    ogr2ogr = shutil.which("ogr2ogr")
+    ogrinfo = shutil.which("ogrinfo")
+    if ogr2ogr and ogrinfo:
+        return ogr2ogr, ogrinfo
+
+    raise RuntimeError("❌ GDAL tools not found. Install QGIS or add GDAL to your PATH.")
+
+OGR2OGR, OGRINFO = detect_gdal_bin()
+
+# === FUNCTIONS ===
+
+def extract_state_code(zip_name):
+    parts = zip_name.replace(".zip", "").split("_")
+    if len(parts) >= 2:
+        return parts[1].lower()
+    return "xx"
+
+def unzip_and_find_gdb(zip_path, extract_to):
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_to)
+
+    for root, dirs, files in os.walk(extract_to):
+        for d in dirs:
+            if d.lower().endswith(".gdb"):
+                return os.path.join(root, d)
+    return None
+
+def gdb_contains_layer(gdb_path, layer="S_FLD_HAZ_AR"):
+    try:
+        result = subprocess.run([OGRINFO, gdb_path], capture_output=True, text=True, check=True)
+        return layer in result.stdout
+    except subprocess.CalledProcessError as e:
+        print(f"❌ ogrinfo failed for {gdb_path}: {e}")
+        return False
+
+def import_flood_layer(gdb_path, state_code):
+    table_name = f"flood_zones_{state_code}"
+    print(f"📥 Importing {table_name}...")
+
+    cmd = [
+        OGR2OGR, "-f", "PostgreSQL", pg_connection,
+        gdb_path, "S_FLD_HAZ_AR",
+        "-nln", table_name,
+        "-nlt", "PROMOTE_TO_MULTI",
+        "-lco", "GEOMETRY_NAME=geom",
+        "-lco", "FID=gid",
+        "-lco", "SPATIAL_INDEX=GIST",
+        "-t_srs", target_srs,
+        "-overwrite"
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    print(result.stdout)
+    print(result.stderr)
+
+    if result.returncode == 0:
+        print(f"✅ Imported {table_name}")
+    else:
+        print(f"❌ Failed to import {table_name}")
+
+# === MAIN ===
+
+if not os.path.isdir(zip_folder):
+    print(f"❌ ZIP folder not found: {zip_folder}")
+    sys.exit(1)
+
+for file in os.listdir(zip_folder):
+    if file.lower().endswith(".zip"):
+        zip_path = os.path.join(zip_folder, file)
+        state_code = extract_state_code(file)
+        extract_path = os.path.join(temp_unzip_dir, f"{state_code}_unzip")
+
+        print(f"\n🗂️ Processing {file}...")
+        if os.path.exists(extract_path):
+            shutil.rmtree(extract_path)
+        os.makedirs(extract_path, exist_ok=True)
+
+        gdb_path = unzip_and_find_gdb(zip_path, extract_path)
+
+        if not gdb_path:
+            print(f"❌ No .gdb found inside {file}")
+            continue
+
+        print(f"🔍 Found GDB: {gdb_path}")
+        if gdb_contains_layer(gdb_path):
+            import_flood_layer(gdb_path, state_code)
+        else:
+            print(f"⚠️ S_Fld_Haz_Ar not found in {file}, skipping.")
+
+print("\n🏁 All zip imports completed.")
