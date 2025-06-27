@@ -1,0 +1,72 @@
+import psycopg2
+
+# === CONFIGURATION ===
+DB_CONFIG = {
+    'dbname': '',
+    'user': '',
+    'password': '',
+    'host': '',
+    'port': 
+}
+
+NEW_SCHEMA = 'fema_flood_zones'
+NEW_TABLE = 'polygons_2025'
+GEOM_COLUMN = 'geom'  # Change if your geometry column is named differently
+
+try:
+    conn = psycopg2.connect(**DB_CONFIG)
+    conn.autocommit = True
+    cur = conn.cursor()
+
+    # Create schema if not exists
+    cur.execute(f"CREATE SCHEMA IF NOT EXISTS {NEW_SCHEMA};")
+
+    # Drop and recreate target table
+    cur.execute(f"DROP TABLE IF EXISTS {NEW_SCHEMA}.{NEW_TABLE};")
+
+    # Get a sample table for structure
+    cur.execute("""
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+        AND table_name LIKE 'flood_zones_%'
+        LIMIT 1;
+    """)
+    sample_table = cur.fetchone()[0]
+
+    # Get column structure from sample table
+    cur.execute(f"""
+        CREATE TABLE {NEW_SCHEMA}.{NEW_TABLE} AS
+        SELECT *, ''::text AS state_code
+        FROM public.{sample_table}
+        WHERE false;
+    """)
+
+    # Loop through all matching tables
+    cur.execute("""
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+        AND table_name LIKE 'flood_zones_%';
+    """)
+    tables = cur.fetchall()
+
+    for (table_name,) in tables:
+        state_code = table_name.replace('flood_zones_', '').upper()
+        print(f"Merging: {table_name} → state_code={state_code}")
+
+        insert_sql = f"""
+            INSERT INTO {NEW_SCHEMA}.{NEW_TABLE}
+            SELECT *, '{state_code}' AS state_code
+            FROM public.{table_name};
+        """
+        cur.execute(insert_sql)
+
+    print("✅ All flood zone tables merged into fema_flood_zones.polygons_2025")
+
+except Exception as e:
+    print("❌ Error:", e)
+
+finally:
+    if 'cur' in locals(): cur.close()
+    if 'conn' in locals(): conn.close()
